@@ -1,0 +1,127 @@
+APX ccmp vs Traditional Branch Performance Comparison
+Generated: Tue Mar 17 01:26:48 PM IST 2026
+========================================================
+
+TEST 1: Predictable Branch Pattern
+-----------------------------------
+Traditional: cmp + je (predictable, always taken)
+Command: ./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 1; mov rcx, 2; mov rdx, 3'      -asm 'cmp rax, rbx; je 1f; xor rcx, rcx; 1: cmp rcx, rdx'      -config branch_perf_config.txt -loop_count 1000 -unroll_count 10
+BR_INST_RETIRED.ALL_BRANCHES: 1.00
+BR_MISP_RETIRED.ALL_BRANCHES: 0.00
+UOPS_RETIRED.SLOTS: 3.00
+CORE_CYCLES: 0.43
+INST_RETIRED.ANY: 3.00
+
+APX ccmp: Conditional compare (no branch)
+Command: ./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 1; mov rcx, 2; mov rdx, 3'      -asm 'cmp rax, rbx; .byte 0x62,0xF4,0x84,0x04,0x3B,0xCA'      -config branch_perf_config.txt -loop_count 1000 -unroll_count 10
+BR_INST_RETIRED.ALL_BRANCHES: 0.00
+BR_MISP_RETIRED.ALL_BRANCHES: 0.00
+UOPS_RETIRED.SLOTS: 2.00
+CORE_CYCLES: 0.40
+INST_RETIRED.ANY: 2.00
+
+
+TEST 2: Unpredictable Branch Pattern (Alternating)
+--------------------------------------------------
+Traditional: cmp + jc (alternating 0101 pattern)
+Command: ./nanoBench.sh -asm_init 'mov r10, 0xAAAAAAAAAAAAAAAA; mov rax, 1; mov rbx, 2'      -asm 'bt r10, 0; jnc 1f; cmp rax, rbx; 1: ror r10, 1'      -config branch_perf_config.txt -loop_count 100 -unroll_count 10
+BR_INST_RETIRED.ALL_BRANCHES: 1.00
+BR_MISP_RETIRED.ALL_BRANCHES: 0.00
+UOPS_RETIRED.SLOTS: 3.50
+CORE_CYCLES: 1.48
+INST_RETIRED.ANY: 3.50
+
+APX ccmp: Conditional compare (no branch)
+Command: ./nanoBench.sh -asm_init 'mov r10, 0xAAAAAAAAAAAAAAAA; mov rax, 1; mov rbx, 2'      -asm 'bt r10, 0; .byte 0x62,0xF4,0x84,0x02,0x3B,0xC3; ror r10, 1'      -config branch_perf_config.txt -loop_count 100 -unroll_count 10
+BR_INST_RETIRED.ALL_BRANCHES: 0.00
+BR_MISP_RETIRED.ALL_BRANCHES: 0.00
+UOPS_RETIRED.SLOTS: 3.00
+CORE_CYCLES: 2.98
+INST_RETIRED.ANY: 3.00
+
+
+TEST 3: Complex Condition Chain
+-------------------------------
+Traditional: Multiple cmp + jmp chain
+Command: ./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 1; mov rcx, 2; mov rdx, 2; mov r8, 3; mov r9, 3'      -asm 'cmp rax, rbx; jne 1f; cmp rcx, rdx; jne 1f; cmp r8, r9; 1:'      -config branch_perf_config.txt -loop_count 500 -unroll_count 5
+BR_INST_RETIRED.ALL_BRANCHES: 2.00
+BR_MISP_RETIRED.ALL_BRANCHES: 0.00
+UOPS_RETIRED.SLOTS: 5.00
+CORE_CYCLES: 0.68
+INST_RETIRED.ANY: 5.00
+
+APX ccmp: Chained conditional compares
+Command: ./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 1; mov rcx, 2; mov rdx, 2; mov r8, 3; mov r9, 3'      -asm 'cmp rax, rbx; .byte 0x62,0xF4,0x84,0x04,0x3B,0xCA; .byte 0x62,0x54,0x84,0x04,0x3B,0xC1'      -config branch_perf_config.txt -loop_count 500 -unroll_count 5
+BR_INST_RETIRED.ALL_BRANCHES: 0.00
+BR_MISP_RETIRED.ALL_BRANCHES: 0.00
+UOPS_RETIRED.SLOTS: 3.00
+CORE_CYCLES: 0.67
+INST_RETIRED.ANY: 3.00
+
+
+TEST 4: Random Branch Pattern
+-----------------------------
+Traditional: cmp + jc (random with rdtsc)
+Command: ./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 2'      -asm 'rdtsc; bt rax, 0; jnc 1f; cmp rax, rbx; 1:'      -config branch_perf_config.txt -loop_count 100 -unroll_count 10
+BR_INST_RETIRED.ALL_BRANCHES: 1.00
+BR_MISP_RETIRED.ALL_BRANCHES: 0.00
+UOPS_RETIRED.SLOTS: 19.00
+CORE_CYCLES: 26.73
+INST_RETIRED.ANY: 3.00
+
+APX ccmp: Conditional compare (random condition)
+Command: ./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 2'      -asm 'rdtsc; bt rax, 0; .byte 0x62,0xF4,0x84,0x02,0x3B,0xC3'      -config branch_perf_config.txt -loop_count 100 -unroll_count 10
+BR_INST_RETIRED.ALL_BRANCHES: 0.00
+BR_MISP_RETIRED.ALL_BRANCHES: 0.00
+UOPS_RETIRED.SLOTS: 19.00
+CORE_CYCLES: 27.49
+INST_RETIRED.ANY: 3.00
+
+
+TEST 5: Nested Conditions with Early Exit
+-----------------------------------------
+Traditional: Nested branches (if-else chain)
+Command: ./nanoBench.sh -asm_init 'mov r10, 0x5555555555555555; mov rax, 1; mov rbx, 1'      -asm 'bt r10, 0; jc 1f; cmp rax, rbx; jne 2f; inc rcx; jmp 3f; 1: dec rcx; jmp 3f; 2: xor rcx, rcx; 3: ror r10, 1'      -config branch_perf_config.txt -loop_count 50 -unroll_count 10
+BR_INST_RETIRED.ALL_BRANCHES: 2.50
+BR_MISP_RETIRED.ALL_BRANCHES: 0.00
+UOPS_RETIRED.SLOTS: 6.00
+CORE_CYCLES: 1.52
+INST_RETIRED.ANY: 6.00
+
+APX ccmp: Conditional selection (cmov + ccmp)
+Command: ./nanoBench.sh -asm_init 'mov r10, 0x5555555555555555; mov rax, 1; mov rbx, 1; xor rcx, rcx'      -asm 'bt r10, 0; .byte 0x62,0xF4,0x84,0x02,0x3B,0xC3; cmovne rcx, rax; ror r10, 1'      -config branch_perf_config.txt -loop_count 50 -unroll_count 10
+BR_INST_RETIRED.ALL_BRANCHES: 0.00
+BR_MISP_RETIRED.ALL_BRANCHES: 0.00
+UOPS_RETIRED.SLOTS: 4.00
+CORE_CYCLES: 3.75
+INST_RETIRED.ANY: 4.00
+
+
+TEST 6: Branch with Side Effects
+--------------------------------
+Traditional: cmp + jne with memory access
+Command: ./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 2; mov r14, r14'      -asm 'cmp rax, rbx; je 1f; mov [r14], rax; inc rax; 1:'      -config branch_perf_config.txt -loop_count 100 -unroll_count 5
+BR_INST_RETIRED.ALL_BRANCHES: 1.00
+BR_MISP_RETIRED.ALL_BRANCHES: 0.00
+UOPS_RETIRED.SLOTS: 2.00
+CORE_CYCLES: 0.97
+INST_RETIRED.ANY: 2.00
+
+APX ccmp: ccmp + cmove pattern
+Command: ./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 2; mov r14, r14'      -asm '.byte 0x62,0xF4,0xA4,0x04,0x3B,0xC3; cmovne r8, rax; mov [r14], r8; inc rax'      -config branch_perf_config.txt -loop_count 100 -unroll_count 5
+BR_INST_RETIRED.ALL_BRANCHES: 0.00
+BR_MISP_RETIRED.ALL_BRANCHES: 0.00
+UOPS_RETIRED.SLOTS: 4.00
+CORE_CYCLES: 2.31
+INST_RETIRED.ANY: 4.00
+
+
+========================================================
+SUMMARY
+========================================================
+Key Observations:
+1. Branch Instructions: ccmp should have fewer BR_INST_RETIRED
+2. Branch Misses: ccmp should have fewer BR_MISP_RETIRED (especially in unpredictable cases)
+3. Cycles: ccmp should have fewer cycles when branch misprediction cost is high
+4. µOps: Compare µOps to understand microarchitectural efficiency
+

@@ -1,0 +1,7 @@
+# Performance counters - architectural events only
+# (This ES chip only supports architectural PMU events)
+C4.00 BR_INST_RETIRED.ALL_BRANCHES
+C5.00 BR_MISP_RETIRED.ALL_BRANCHES
+C2.02 UOPS_RETIRED.SLOTS
+3C.00 CORE_CYCLES
+C0.00 INST_RETIRED.ANY
