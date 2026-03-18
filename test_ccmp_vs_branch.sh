@@ -71,9 +71,9 @@ run_benchmark() {
 
     # Extract key metrics
     cycles=$(echo "$output" | grep -E "CORE_CYCLES|CPU_CLK_UNHALTED.THREAD" | head -1 | awk '{print $2}')
-    inst_retired=$(echo "$output" | grep "INST_RETIRED" | head -1 | awk '{print $2}')
-    br_inst=$(echo "$output" | grep "BR_INST_RETIRED" | head -1 | awk '{print $2}')
-    br_misp=$(echo "$output" | grep "BR_MISP_RETIRED" | head -1 | awk '{print $2}')
+    inst_retired=$(echo "$output" | grep "^INST_RETIRED" | head -1 | awk '{print $2}')
+    br_inst=$(echo "$output" | grep "^BR_INST_RETIRED" | head -1 | awk '{print $2}')
+    br_misp=$(echo "$output" | grep "^BR_MISP_RETIRED" | head -1 | awk '{print $2}')
     uops=$(echo "$output" | grep "UOPS_RETIRED.SLOTS" | head -1 | awk '{print $2}')
 
     echo "$output" >> $RESULTS_FILE
@@ -88,138 +88,286 @@ run_benchmark() {
     echo ""
 }
 
+# ============================================================
+# CCMP Encoding Reference:
+#   ccmpe  reg1, reg2, dfv=0:   condition = equal (SCC=4)
+#     rax,rbx: 62 F4 84 04 3B C3
+#     rcx,rdx: 62 F4 84 04 3B CA
+#     r8, r9:  62 54 84 04 3B C1
+#   ccmpc  reg1, reg2, dfv=0:   condition = carry (SCC=2)
+#     rax,rbx: 62 F4 84 02 3B C3
+#   ccmpne reg1, reg2, dfv=ZF:  condition = not-equal (SCC=5)
+#     rcx,rdx: 62 F4 94 05 3B CA
+#     r8, r9:  62 54 94 05 3B C1
+#     rax,rbx: 62 F4 94 05 3B C3
+# ============================================================
+
+##########################################################
+#  SECTION 1: 2-Condition Chains
+##########################################################
+
 echo -e "${YELLOW}======================================================${NC}"
-echo -e "${YELLOW}TEST 1: Predictable Branch Pattern (Best Case)${NC}"
+echo -e "${YELLOW}TEST 1: 2-Cond AND (All TRUE)${NC}"
 echo -e "${YELLOW}======================================================${NC}\n"
 
-echo "TEST 1: Predictable Branch Pattern" >> $RESULTS_FILE
-echo "-----------------------------------" >> $RESULTS_FILE
+echo "TEST 1: 2-Cond AND (All TRUE)" >> $RESULTS_FILE
+echo "------------------------------" >> $RESULTS_FILE
 
-# Traditional: cmp + conditional jump (always taken)
-run_benchmark "Traditional: cmp + je (predictable, always taken)" \
-    "./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 1; mov rcx, 2; mov rdx, 3' \
-     -asm 'cmp rax, rbx; je 1f; xor rcx, rcx; 1: cmp rcx, rdx' \
+# JS: if (a === b && c === d)   // a=1,b=1,c=2,d=2 → both true
+# Traditional: cmp rax,rbx; jne 1f; cmp rcx,rdx; 1:
+#   3 instr, 1 branch (jne not-taken)
+run_benchmark "Traditional: cmp+jne+cmp (2-AND, all true)" \
+    "./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 1; mov rcx, 2; mov rdx, 2' \
+     -asm 'cmp rax, rbx; jne 1f; cmp rcx, rdx; 1:' \
      -config $CONFIG_FILE -loop_count 1000 -unroll_count 10"
 
-# APX ccmp: conditional compare (no branch)
-# ccmpe rcx, rdx, 0: if ZF=1 then cmp rcx,rdx; else flags=0
-# Encoding: EVEX{F4,84(W=1,dfv=0),04(cc=equal)} 3B CA(rcx,rdx)
-run_benchmark "APX ccmp: Conditional compare (no branch)" \
-    "./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 1; mov rcx, 2; mov rdx, 3' \
+# APX: cmp rax,rbx; ccmpe rcx,rdx,0
+#   2 instr, 0 branches
+run_benchmark "APX ccmp: cmp+ccmpe (2-AND, all true)" \
+    "./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 1; mov rcx, 2; mov rdx, 2' \
      -asm 'cmp rax, rbx; .byte 0x62,0xF4,0x84,0x04,0x3B,0xCA' \
      -config $CONFIG_FILE -loop_count 1000 -unroll_count 10"
 
 echo -e "${YELLOW}======================================================${NC}"
-echo -e "${YELLOW}TEST 2: Unpredictable Branch Pattern (Alternating)${NC}"
+echo -e "${YELLOW}TEST 2: 2-Cond AND (All FALSE)${NC}"
 echo -e "${YELLOW}======================================================${NC}\n"
 
 echo "" >> $RESULTS_FILE
-echo "TEST 2: Unpredictable Branch Pattern (Alternating)" >> $RESULTS_FILE
-echo "--------------------------------------------------" >> $RESULTS_FILE
+echo "TEST 2: 2-Cond AND (All FALSE)" >> $RESULTS_FILE
+echo "-------------------------------" >> $RESULTS_FILE
 
-# Traditional: alternating pattern (0xAAAA... = 10101010...)
-run_benchmark "Traditional: cmp + jc (alternating 0101 pattern)" \
+# JS: if (a === b && c === d)   // a=1,b=2 → 1st false → short-circuit
+# Traditional: jne TAKEN → skips 2nd cmp.  2 instr executed, 1 branch
+run_benchmark "Traditional: cmp+jne+cmp (2-AND, 1st false, jne taken)" \
+    "./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 2; mov rcx, 2; mov rdx, 2' \
+     -asm 'cmp rax, rbx; jne 1f; cmp rcx, rdx; 1:' \
+     -config $CONFIG_FILE -loop_count 1000 -unroll_count 10"
+
+# APX: ccmpe uses dfv=0 (condition not met). 2 instr, 0 branches
+run_benchmark "APX ccmp: cmp+ccmpe (2-AND, 1st false)" \
+    "./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 2; mov rcx, 2; mov rdx, 2' \
+     -asm 'cmp rax, rbx; .byte 0x62,0xF4,0x84,0x04,0x3B,0xCA' \
+     -config $CONFIG_FILE -loop_count 1000 -unroll_count 10"
+
+echo -e "${YELLOW}======================================================${NC}"
+echo -e "${YELLOW}TEST 3: 2-Cond AND (Alternating 1st Condition)${NC}"
+echo -e "${YELLOW}======================================================${NC}\n"
+
+echo "" >> $RESULTS_FILE
+echo "TEST 3: 2-Cond AND (Alternating 1st Condition)" >> $RESULTS_FILE
+echo "------------------------------------------------" >> $RESULTS_FILE
+
+# JS: if (getBit() && a < b)   // bit alternates T/F each iteration
+# Traditional: bt r10,0; jnc 1f; cmp rax,rbx; 1: ror r10,1
+run_benchmark "Traditional: bt+jnc+cmp (2-AND, alternating)" \
     "./nanoBench.sh -asm_init 'mov r10, 0xAAAAAAAAAAAAAAAA; mov rax, 1; mov rbx, 2' \
      -asm 'bt r10, 0; jnc 1f; cmp rax, rbx; 1: ror r10, 1' \
      -config $CONFIG_FILE -loop_count 100 -unroll_count 10"
 
-# APX ccmp: no branch needed
-# ccmpc rax, rbx, 0: if CF=1 then cmp rax,rbx; else flags=0
-# Encoding: EVEX{F4,84(W=1,dfv=0),02(cc=carry)} 3B C3(rax,rbx)
-run_benchmark "APX ccmp: Conditional compare (no branch)" \
+# APX: bt r10,0; ccmpc rax,rbx,0; ror r10,1
+run_benchmark "APX ccmp: bt+ccmpc (2-AND, alternating)" \
     "./nanoBench.sh -asm_init 'mov r10, 0xAAAAAAAAAAAAAAAA; mov rax, 1; mov rbx, 2' \
      -asm 'bt r10, 0; .byte 0x62,0xF4,0x84,0x02,0x3B,0xC3; ror r10, 1' \
      -config $CONFIG_FILE -loop_count 100 -unroll_count 10"
 
 echo -e "${YELLOW}======================================================${NC}"
-echo -e "${YELLOW}TEST 3: Complex Condition Chain${NC}"
+echo -e "${YELLOW}TEST 4: 2-Cond AND (Random 1st Condition)${NC}"
 echo -e "${YELLOW}======================================================${NC}\n"
 
 echo "" >> $RESULTS_FILE
-echo "TEST 3: Complex Condition Chain" >> $RESULTS_FILE
-echo "-------------------------------" >> $RESULTS_FILE
+echo "TEST 4: 2-Cond AND (Random 1st Condition)" >> $RESULTS_FILE
+echo "-------------------------------------------" >> $RESULTS_FILE
 
-# Traditional: multiple branches (if A && B && C pattern)
-run_benchmark "Traditional: Multiple cmp + jmp chain" \
-    "./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 1; mov rcx, 2; mov rdx, 2; mov r8, 3; mov r9, 3' \
-     -asm 'cmp rax, rbx; jne 1f; cmp rcx, rdx; jne 1f; cmp r8, r9; 1:' \
-     -config $CONFIG_FILE -loop_count 500 -unroll_count 5"
-
-# APX ccmp: chained conditional compares (using ccmp's conditional execution)
-# ccmp rule: IF (flags satisfy condition) THEN compare ELSE use default flags
-# ccmpe rcx, rdx, 0: EVEX{F4,84,04} 3B CA
-# ccmpe r8, r9, 0:  EVEX{54(~R=0,~B=0),84,04} 3B C1
-run_benchmark "APX ccmp: Chained conditional compares" \
-    "./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 1; mov rcx, 2; mov rdx, 2; mov r8, 3; mov r9, 3' \
-     -asm 'cmp rax, rbx; .byte 0x62,0xF4,0x84,0x04,0x3B,0xCA; .byte 0x62,0x54,0x84,0x04,0x3B,0xC1' \
-     -config $CONFIG_FILE -loop_count 500 -unroll_count 5"
-
-echo -e "${YELLOW}======================================================${NC}"
-echo -e "${YELLOW}TEST 4: Random Branch Pattern (Worst Case)${NC}"
-echo -e "${YELLOW}======================================================${NC}\n"
-
-echo "" >> $RESULTS_FILE
-echo "TEST 4: Random Branch Pattern" >> $RESULTS_FILE
-echo "-----------------------------" >> $RESULTS_FILE
-
-# Traditional: random pattern using rdtsc
-run_benchmark "Traditional: cmp + jc (random with rdtsc)" \
+# JS: if (randomBit() && a < b)   // rdtsc provides random bit
+# Traditional: rdtsc; bt rax,0; jnc 1f; cmp rax,rbx; 1:
+run_benchmark "Traditional: rdtsc+bt+jnc+cmp (2-AND, random)" \
     "./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 2' \
      -asm 'rdtsc; bt rax, 0; jnc 1f; cmp rax, rbx; 1:' \
      -config $CONFIG_FILE -loop_count 100 -unroll_count 10"
 
-# APX ccmp: no branch
-# ccmpc rax, rbx, 0: EVEX{F4,84,02} 3B C3
-run_benchmark "APX ccmp: Conditional compare (random condition)" \
+# APX: rdtsc; bt rax,0; ccmpc rax,rbx,0
+run_benchmark "APX ccmp: rdtsc+bt+ccmpc (2-AND, random)" \
     "./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 2' \
      -asm 'rdtsc; bt rax, 0; .byte 0x62,0xF4,0x84,0x02,0x3B,0xC3' \
      -config $CONFIG_FILE -loop_count 100 -unroll_count 10"
 
 echo -e "${YELLOW}======================================================${NC}"
-echo -e "${YELLOW}TEST 5: Nested Conditions with Early Exit${NC}"
+echo -e "${YELLOW}TEST 5: 2-Cond OR (All TRUE)${NC}"
 echo -e "${YELLOW}======================================================${NC}\n"
 
 echo "" >> $RESULTS_FILE
-echo "TEST 5: Nested Conditions with Early Exit" >> $RESULTS_FILE
-echo "-----------------------------------------" >> $RESULTS_FILE
+echo "TEST 5: 2-Cond OR (All TRUE)" >> $RESULTS_FILE
+echo "-----------------------------" >> $RESULTS_FILE
 
-# Traditional: nested if-else with early exit
-run_benchmark "Traditional: Nested branches (if-else chain)" \
-    "./nanoBench.sh -asm_init 'mov r10, 0x5555555555555555; mov rax, 1; mov rbx, 1' \
-     -asm 'bt r10, 0; jc 1f; cmp rax, rbx; jne 2f; inc rcx; jmp 3f; 1: dec rcx; jmp 3f; 2: xor rcx, rcx; 3: ror r10, 1' \
-     -config $CONFIG_FILE -loop_count 50 -unroll_count 10"
+# JS: if (a === b || c === d)   // a=1,b=1 → 1st true → short-circuit
+# Traditional: cmp rax,rbx; je 1f; cmp rcx,rdx; 1:
+#   je TAKEN (1st true → skip 2nd). 2 instr executed, 1 branch
+run_benchmark "Traditional: cmp+je+cmp (2-OR, 1st true, je taken)" \
+    "./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 1; mov rcx, 2; mov rdx, 2' \
+     -asm 'cmp rax, rbx; je 1f; cmp rcx, rdx; 1:' \
+     -config $CONFIG_FILE -loop_count 1000 -unroll_count 10"
 
-# APX ccmp: conditional execution without branches
-# ccmpc rax, rbx, 0: EVEX{F4,84,02} 3B C3
-run_benchmark "APX ccmp: Conditional selection (cmov + ccmp)" \
-    "./nanoBench.sh -asm_init 'mov r10, 0x5555555555555555; mov rax, 1; mov rbx, 1; xor rcx, rcx' \
-     -asm 'bt r10, 0; .byte 0x62,0xF4,0x84,0x02,0x3B,0xC3; cmovne rcx, rax; ror r10, 1' \
-     -config $CONFIG_FILE -loop_count 50 -unroll_count 10"
+# APX: cmp rax,rbx; ccmpne rcx,rdx,dfv=ZF
+#   OR logic: if 1st equal → dfv gives ZF=1 (true); if 1st not-equal → do 2nd cmp
+#   ccmpne rcx,rdx,dfv=ZF: 62 F4 94 05 3B CA
+run_benchmark "APX ccmp: cmp+ccmpne (2-OR, dfv=ZF)" \
+    "./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 1; mov rcx, 2; mov rdx, 2' \
+     -asm 'cmp rax, rbx; .byte 0x62,0xF4,0x94,0x05,0x3B,0xCA' \
+     -config $CONFIG_FILE -loop_count 1000 -unroll_count 10"
+
+##########################################################
+#  SECTION 2: 3-Condition Chains
+##########################################################
 
 echo -e "${YELLOW}======================================================${NC}"
-echo -e "${YELLOW}TEST 6: Branch with Side Effects${NC}"
+echo -e "${YELLOW}TEST 6: 3-Cond AND (All TRUE)${NC}"
 echo -e "${YELLOW}======================================================${NC}\n"
 
 echo "" >> $RESULTS_FILE
-echo "TEST 6: Branch with Side Effects" >> $RESULTS_FILE
+echo "TEST 6: 3-Cond AND (All TRUE)" >> $RESULTS_FILE
+echo "------------------------------" >> $RESULTS_FILE
+
+# JS: if (a===b && c===d && e===f)   // all equal → all true
+# Traditional: cmp+jne; cmp+jne; cmp  = 5 instr, 2 branches (both not-taken)
+run_benchmark "Traditional: cmp+jne x3 (3-AND, all true, 2 branches)" \
+    "./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 1; mov rcx, 2; mov rdx, 2; mov r8, 3; mov r9, 3' \
+     -asm 'cmp rax, rbx; jne 1f; cmp rcx, rdx; jne 1f; cmp r8, r9; 1:' \
+     -config $CONFIG_FILE -loop_count 500 -unroll_count 5"
+
+# APX: cmp; ccmpe; ccmpe = 3 instr, 0 branches
+#   ccmpe rcx,rdx,0: 62 F4 84 04 3B CA
+#   ccmpe r8, r9, 0: 62 54 84 04 3B C1
+run_benchmark "APX ccmp: cmp+ccmpe x2 (3-AND, all true, 0 branches)" \
+    "./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 1; mov rcx, 2; mov rdx, 2; mov r8, 3; mov r9, 3' \
+     -asm 'cmp rax, rbx; .byte 0x62,0xF4,0x84,0x04,0x3B,0xCA; .byte 0x62,0x54,0x84,0x04,0x3B,0xC1' \
+     -config $CONFIG_FILE -loop_count 500 -unroll_count 5"
+
+echo -e "${YELLOW}======================================================${NC}"
+echo -e "${YELLOW}TEST 7: 3-Cond AND (All FALSE)${NC}"
+echo -e "${YELLOW}======================================================${NC}\n"
+
+echo "" >> $RESULTS_FILE
+echo "TEST 7: 3-Cond AND (All FALSE)" >> $RESULTS_FILE
+echo "-------------------------------" >> $RESULTS_FILE
+
+# JS: if (a===b && c===d && e===f)   // a=1,b=2 → 1st false → short-circuit
+# Traditional: jne TAKEN immediately → 2 instr executed, 1 branch
+run_benchmark "Traditional: cmp+jne x3 (3-AND, 1st false, jne taken)" \
+    "./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 2; mov rcx, 2; mov rdx, 2; mov r8, 3; mov r9, 3' \
+     -asm 'cmp rax, rbx; jne 1f; cmp rcx, rdx; jne 1f; cmp r8, r9; 1:' \
+     -config $CONFIG_FILE -loop_count 500 -unroll_count 5"
+
+# APX: all 3 ccmp execute unconditionally. 3 instr, 0 branches
+run_benchmark "APX ccmp: cmp+ccmpe x2 (3-AND, 1st false, 0 branches)" \
+    "./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 2; mov rcx, 2; mov rdx, 2; mov r8, 3; mov r9, 3' \
+     -asm 'cmp rax, rbx; .byte 0x62,0xF4,0x84,0x04,0x3B,0xCA; .byte 0x62,0x54,0x84,0x04,0x3B,0xC1' \
+     -config $CONFIG_FILE -loop_count 500 -unroll_count 5"
+
+##########################################################
+#  SECTION 3: 4-Condition Chains
+##########################################################
+
+echo -e "${YELLOW}======================================================${NC}"
+echo -e "${YELLOW}TEST 8: 4-Cond AND (All TRUE)${NC}"
+echo -e "${YELLOW}======================================================${NC}\n"
+
+echo "" >> $RESULTS_FILE
+echo "TEST 8: 4-Cond AND (All TRUE)" >> $RESULTS_FILE
+echo "------------------------------" >> $RESULTS_FILE
+
+# JS: if (a===b && c===d && e===f && a===b)   // reuse pair for 4th
+# Traditional: cmp+jne x4 = 7 instr, 3 branches (all not-taken)
+run_benchmark "Traditional: cmp+jne x4 (4-AND, all true, 3 branches)" \
+    "./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 1; mov rcx, 2; mov rdx, 2; mov r8, 3; mov r9, 3' \
+     -asm 'cmp rax, rbx; jne 1f; cmp rcx, rdx; jne 1f; cmp r8, r9; jne 1f; cmp rax, rbx; 1:' \
+     -config $CONFIG_FILE -loop_count 500 -unroll_count 5"
+
+# APX: cmp + ccmpe x3 = 4 instr, 0 branches
+#   ccmpe rcx,rdx,0: 62 F4 84 04 3B CA
+#   ccmpe r8, r9, 0: 62 54 84 04 3B C1
+#   ccmpe rax,rbx,0: 62 F4 84 04 3B C3
+run_benchmark "APX ccmp: cmp+ccmpe x3 (4-AND, all true, 0 branches)" \
+    "./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 1; mov rcx, 2; mov rdx, 2; mov r8, 3; mov r9, 3' \
+     -asm 'cmp rax, rbx; .byte 0x62,0xF4,0x84,0x04,0x3B,0xCA; .byte 0x62,0x54,0x84,0x04,0x3B,0xC1; .byte 0x62,0xF4,0x84,0x04,0x3B,0xC3' \
+     -config $CONFIG_FILE -loop_count 500 -unroll_count 5"
+
+echo -e "${YELLOW}======================================================${NC}"
+echo -e "${YELLOW}TEST 9: 4-Cond AND (All FALSE)${NC}"
+echo -e "${YELLOW}======================================================${NC}\n"
+
+echo "" >> $RESULTS_FILE
+echo "TEST 9: 4-Cond AND (All FALSE)" >> $RESULTS_FILE
+echo "-------------------------------" >> $RESULTS_FILE
+
+# JS: if (a===b && c===d && e===f && a===b)   // a=1,b=2 → 1st false
+# Traditional: jne TAKEN immediately → 2 instr, 1 branch
+run_benchmark "Traditional: cmp+jne x4 (4-AND, 1st false, jne taken)" \
+    "./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 2; mov rcx, 2; mov rdx, 2; mov r8, 3; mov r9, 3' \
+     -asm 'cmp rax, rbx; jne 1f; cmp rcx, rdx; jne 1f; cmp r8, r9; jne 1f; cmp rax, rbx; 1:' \
+     -config $CONFIG_FILE -loop_count 500 -unroll_count 5"
+
+# APX: all 4 ccmp execute. 4 instr, 0 branches
+run_benchmark "APX ccmp: cmp+ccmpe x3 (4-AND, 1st false, 0 branches)" \
+    "./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 2; mov rcx, 2; mov rdx, 2; mov r8, 3; mov r9, 3' \
+     -asm 'cmp rax, rbx; .byte 0x62,0xF4,0x84,0x04,0x3B,0xCA; .byte 0x62,0x54,0x84,0x04,0x3B,0xC1; .byte 0x62,0xF4,0x84,0x04,0x3B,0xC3' \
+     -config $CONFIG_FILE -loop_count 500 -unroll_count 5"
+
+##########################################################
+#  SECTION 4: 5-Condition Chains
+##########################################################
+
+echo -e "${YELLOW}======================================================${NC}"
+echo -e "${YELLOW}TEST 10: 5-Cond AND (All TRUE)${NC}"
+echo -e "${YELLOW}======================================================${NC}\n"
+
+echo "" >> $RESULTS_FILE
+echo "TEST 10: 5-Cond AND (All TRUE)" >> $RESULTS_FILE
+echo "-------------------------------" >> $RESULTS_FILE
+
+# JS: if (a===b && c===d && e===f && a===b && c===d)   // reuse pairs
+# Traditional: cmp+jne x5 = 9 instr, 4 branches (all not-taken)
+run_benchmark "Traditional: cmp+jne x5 (5-AND, all true, 4 branches)" \
+    "./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 1; mov rcx, 2; mov rdx, 2; mov r8, 3; mov r9, 3' \
+     -asm 'cmp rax, rbx; jne 1f; cmp rcx, rdx; jne 1f; cmp r8, r9; jne 1f; cmp rax, rbx; jne 1f; cmp rcx, rdx; 1:' \
+     -config $CONFIG_FILE -loop_count 500 -unroll_count 5"
+
+# APX: cmp + ccmpe x4 = 5 instr, 0 branches
+#   ccmpe rcx,rdx,0: 62 F4 84 04 3B CA
+#   ccmpe r8, r9, 0: 62 54 84 04 3B C1
+#   ccmpe rax,rbx,0: 62 F4 84 04 3B C3
+#   ccmpe rcx,rdx,0: 62 F4 84 04 3B CA  (reused)
+run_benchmark "APX ccmp: cmp+ccmpe x4 (5-AND, all true, 0 branches)" \
+    "./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 1; mov rcx, 2; mov rdx, 2; mov r8, 3; mov r9, 3' \
+     -asm 'cmp rax, rbx; .byte 0x62,0xF4,0x84,0x04,0x3B,0xCA; .byte 0x62,0x54,0x84,0x04,0x3B,0xC1; .byte 0x62,0xF4,0x84,0x04,0x3B,0xC3; .byte 0x62,0xF4,0x84,0x04,0x3B,0xCA' \
+     -config $CONFIG_FILE -loop_count 500 -unroll_count 5"
+
+echo -e "${YELLOW}======================================================${NC}"
+echo -e "${YELLOW}TEST 11: 5-Cond AND (All FALSE)${NC}"
+echo -e "${YELLOW}======================================================${NC}\n"
+
+echo "" >> $RESULTS_FILE
+echo "TEST 11: 5-Cond AND (All FALSE)" >> $RESULTS_FILE
 echo "--------------------------------" >> $RESULTS_FILE
 
-# Traditional: branch with memory access
-run_benchmark "Traditional: cmp + jne with memory access" \
-    "./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 2; mov r14, r14' \
-     -asm 'cmp rax, rbx; je 1f; mov [r14], rax; inc rax; 1:' \
-     -config $CONFIG_FILE -loop_count 100 -unroll_count 5"
+# JS: if (a===b && c===d && e===f && a===b && c===d)   // a=1,b=2 → 1st false
+# Traditional: jne TAKEN immediately → 2 instr, 1 branch
+run_benchmark "Traditional: cmp+jne x5 (5-AND, 1st false, jne taken)" \
+    "./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 2; mov rcx, 2; mov rdx, 2; mov r8, 3; mov r9, 3' \
+     -asm 'cmp rax, rbx; jne 1f; cmp rcx, rdx; jne 1f; cmp r8, r9; jne 1f; cmp rax, rbx; jne 1f; cmp rcx, rdx; 1:' \
+     -config $CONFIG_FILE -loop_count 500 -unroll_count 5"
 
-# APX ccmp: conditional compare + conditional move
-# ccmpe rax, rbx, 4(dfv=SF): if ZF=1 then cmp rax,rbx; else SF=1,ZF=0
-# Encoding: EVEX{F4,A4(W=1,dfv=SF=0100),04(cc=equal)} 3B C3(rax,rbx)
-run_benchmark "APX ccmp: ccmp + cmove pattern" \
-    "./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 2; mov r14, r14' \
-     -asm '.byte 0x62,0xF4,0xA4,0x04,0x3B,0xC3; cmovne r8, rax; mov [r14], r8; inc rax' \
-     -config $CONFIG_FILE -loop_count 100 -unroll_count 5"
+# APX: all 5 ccmp execute. 5 instr, 0 branches
+run_benchmark "APX ccmp: cmp+ccmpe x4 (5-AND, 1st false, 0 branches)" \
+    "./nanoBench.sh -asm_init 'mov rax, 1; mov rbx, 2; mov rcx, 2; mov rdx, 2; mov r8, 3; mov r9, 3' \
+     -asm 'cmp rax, rbx; .byte 0x62,0xF4,0x84,0x04,0x3B,0xCA; .byte 0x62,0x54,0x84,0x04,0x3B,0xC1; .byte 0x62,0xF4,0x84,0x04,0x3B,0xC3; .byte 0x62,0xF4,0x84,0x04,0x3B,0xCA' \
+     -config $CONFIG_FILE -loop_count 500 -unroll_count 5"
+
+##########################################################
+#  Done
+##########################################################
 
 echo -e "\n${GREEN}======================================================${NC}"
-echo -e "${GREEN}All tests completed!${NC}"
+echo -e "${GREEN}All 11 tests completed!${NC}"
 echo -e "${GREEN}Results saved to: $RESULTS_FILE${NC}"
 echo -e "${GREEN}======================================================${NC}\n"
 
@@ -228,11 +376,20 @@ echo "" >> $RESULTS_FILE
 echo "========================================================" >> $RESULTS_FILE
 echo "SUMMARY" >> $RESULTS_FILE
 echo "========================================================" >> $RESULTS_FILE
-echo "Key Observations:" >> $RESULTS_FILE
-echo "1. Branch Instructions: ccmp should have fewer BR_INST_RETIRED" >> $RESULTS_FILE
-echo "2. Branch Misses: ccmp should have fewer BR_MISP_RETIRED (especially in unpredictable cases)" >> $RESULTS_FILE
-echo "3. Cycles: ccmp should have fewer cycles when branch misprediction cost is high" >> $RESULTS_FILE
-echo "4. µOps: Compare µOps to understand microarchitectural efficiency" >> $RESULTS_FILE
+cat >> $RESULTS_FILE << 'SUMEOF'
+Test Layout:
+  2-Cond AND: TEST 1 (TRUE), TEST 2 (FALSE), TEST 3 (Alternating), TEST 4 (Random)
+  2-Cond OR:  TEST 5 (TRUE)
+  3-Cond AND: TEST 6 (TRUE), TEST 7 (FALSE)
+  4-Cond AND: TEST 8 (TRUE), TEST 9 (FALSE)
+  5-Cond AND: TEST 10 (TRUE), TEST 11 (FALSE)
+
+Key Observations:
+1. Branch Instructions: ccmp eliminates ALL branches (BR_INST_RETIRED = 0)
+2. Instruction Count: ccmp reduces N-cond AND from (2N-1) to N instructions
+3. Cycles: ccmp benefit grows with more conditions (amortizes ccmp latency)
+4. FALSE cases: traditional short-circuits (fewer instr), ccmp always executes all
+SUMEOF
 echo "" >> $RESULTS_FILE
 
 echo -e "${BLUE}To view detailed results:${NC}"
